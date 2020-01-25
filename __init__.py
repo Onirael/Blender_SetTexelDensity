@@ -14,8 +14,8 @@ import numpy as np
 from mathutils import Vector
 
 # 3D tri area ABC is half the length of AB cross product AC 
-def tri_area( co1, co2, co3 ):
-    return (co2 - co1).cross( co3 - co1 ).length / 2.0
+def tri_area(co1, co2, co3):
+    return (co2 - co1).cross(co3 - co1).length / 2.0
 
 def DeselectAll(bMesh):
     for p in bMesh.faces:
@@ -23,38 +23,34 @@ def DeselectAll(bMesh):
 
 def ResetSelection(context):
     obj = context.object
-    bEditMode = obj.mode == 'EDIT'
-    if bEditMode:
-        bpy.ops.object.mode_set()
-        bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.object.mode_set()
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    bpy.ops.object.mode_set(mode='EDIT')
 
 def GetIslands(bMesh, bExpandSelection=True):
     selectedFaces = [p.index for p in bMesh.faces if p.select]
-
     bMesh.faces.ensure_lookup_table()
 
     uvIslands = []
+    seenFaces = np.array([])
     for faceIndex in selectedFaces:
-        DeselectAll(bMesh)
-        bMesh.faces[faceIndex].select = True
-        if bExpandSelection:
-            bpy.ops.mesh.select_linked(delimit={'UV'})
-        newFaces = np.asarray([p.index for p in bMesh.faces if p.select])
-    
-        bIsContained = False
-        for island in uvIslands:
-            bIsContained = newFaces[0] == island[0]
-            if bIsContained:
-                break
-        if not bIsContained:
+        bIsUnique = not np.any(seenFaces == faceIndex)
+        
+        if bIsUnique:
+            if bExpandSelection:
+                DeselectAll(bMesh)
+                bMesh.faces[faceIndex].select = True
+                bpy.ops.mesh.select_linked(delimit={'UV'})
+            newFaces = np.asarray([p.index for p in bMesh.faces if p.select])
             uvIslands.append(newFaces)
-          
+            seenFaces = np.append(seenFaces, newFaces)
+
     return uvIslands
 
-def GetFaceDensities(bMesh, uvIslands, texResolution):
+def GetFaceDensities(context, bMesh, uvIslands, texResolution):
     triangle_loops = bMesh.calc_loop_triangles()
-    uv_loop = bMesh.loops.layers.uv[0]
-    
+    activeUV = bpy.context.object.data.uv_layers.active.name
+    uv_loop = bMesh.loops.layers.uv[activeUV]
     DeselectAll(bMesh)
 
     areas = {}
@@ -72,9 +68,9 @@ def GetFaceDensities(bMesh, uvIslands, texResolution):
     
         face_area += tri_area(*(l.vert.co for l in loop))
         uv_area += tri_area(*(Vector((*l[uv_loop].uv, 0)) for l in loop))
-        if areas[face] != (0.0, 0.0):
-            densities[face] = texResolution * math.sqrt(uv_area/(face_area*10000))
+        densities[face] = texResolution * math.sqrt(uv_area/(face_area*10000))
         areas[face] = (uv_area, face_area)
+
     return densities
 
 def ScaleUV(context, bMesh, targetDensity, uvIslands, densities):
@@ -91,30 +87,27 @@ def ScaleUV(context, bMesh, targetDensity, uvIslands, densities):
         islandDensity = np.mean(islandDensities)
     
         scale = targetDensity/islandDensity
-        bpy.ops.transform.resize(value=(scale, scale, scale),
-                                 mirror=True,
-                                 use_proportional_edit=False,
-                                 proportional_edit_falloff='SMOOTH',
-                                 proportional_size=1,
-                                 use_proportional_connected=False,
-                                 use_proportional_projected=False)
+        bpy.ops.transform.resize(value=(scale, scale, scale))
+        DeselectAll(bMesh)
+
     context.area.ui_type = startContext
 
 def GetDensity(context, texResolution, bExpandSelection=True):
+
     obj = context.object
     ResetSelection(context)
     bm = bmesh.from_edit_mesh(obj.data)
     bm.faces.ensure_lookup_table()
-    
+
     bContinue = False
     for face in bm.faces:
         if face.select:
             bContinue = True
             break
-        
+
     if bContinue:
         uvIslands = GetIslands(bm, bExpandSelection)
-        densities = GetFaceDensities(bm, uvIslands, texResolution)
+        densities = GetFaceDensities(context, bm, uvIslands, texResolution)
     
         # Select islands and get per-island density
         perIslandDensities = np.zeros((len(uvIslands)))
@@ -132,7 +125,7 @@ def GetDensity(context, texResolution, bExpandSelection=True):
 
         bmesh.update_edit_mesh(obj.data)
         bm.free()
-        
+
         # Return average of all face densities
         return np.mean(perIslandDensities)
     else:
@@ -147,7 +140,7 @@ def SetDensity(context, targetDensity, texResolution):
     bm.faces.ensure_lookup_table()
 
     uvIslands = GetIslands(bm)
-    densities = GetFaceDensities(bm, uvIslands, texResolution)
+    densities = GetFaceDensities(context, bm, uvIslands, texResolution)
     ScaleUV(context, bm, targetDensity, uvIslands, densities)
     
     bmesh.update_edit_mesh(obj.data)
